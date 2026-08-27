@@ -31,9 +31,9 @@
  */
 
 const PROVIDER = "ofox";
-const VERSION = "v7-ofox-kep";
+const VERSION = "v7-ofox-1h";
 const DEFAULT_UPSTREAM = "https://api.ofox.ai/anthropic";
-const CACHE_TTL = (Deno.env.get("CACHE_TTL") || "5m").toLowerCase() === "1h" ? "1h" : "5m";
+const CACHE_TTL = (Deno.env.get("CACHE_TTL") || "1h").toLowerCase() === "1h" ? "1h" : "5m";
 const TTL = CACHE_TTL;
 const BETA_FLAG = TTL === "1h" ? "extended-cache-ttl-2025-04-11" : "";
 const MAX_BREAKPOINTS = 4;
