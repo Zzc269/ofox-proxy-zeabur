@@ -31,7 +31,7 @@
  */
 
 const PROVIDER = "ofox";
-const VERSION = "v7-ofox";
+const VERSION = "v7-ofox-nobeta";
 const DEFAULT_UPSTREAM = "https://api.ofox.ai/anthropic";
 const TTL = "1h";
 const BETA_FLAG = "extended-cache-ttl-2025-04-11";
@@ -777,7 +777,7 @@ async function handler(req: Request): Promise<Response> {
       version: VERSION,
       upstream: UPSTREAM,
       cache: CACHE_ENABLED ? "1h/tools+system+messages" : "passthrough",
-      beta: CACHE_ENABLED ? BETA_FLAG : "not-added",
+      beta: "not-sent",
       maxBreakpoints: MAX_BREAKPOINTS,
       minChars: MIN_CHARS,
       timeInjection: TIME_ENABLED ? "last-user-block-after-breakpoint" : "off",
@@ -892,7 +892,7 @@ async function handler(req: Request): Promise<Response> {
       const t = appendRuntimeTime(body);
       rec.timeAdded = t.added ? "yes" : `no:${t.reason ?? "?"}`;
     }
-    headers.set("anthropic-beta", mergeBeta(headers.get("anthropic-beta")));
+    // beta header intentionally NOT sent (legacy extended-cache-ttl beta obsolete per 2026 docs)
   } else if (CACHE_ENABLED && isChat(path)) {
     const inj = injectOpenAI(body);
     rec.applied = `${inj.applied.join(",") || "-"}${inj.skipped ? `|skip:${inj.skipped}` : ""}`;
