@@ -31,7 +31,7 @@
  */
 
 const PROVIDER = "ofox";
-const VERSION = "v7-ofox-1h";
+const VERSION = "v7-ofox-1h-beta";
 const DEFAULT_UPSTREAM = "https://api.ofox.ai/anthropic";
 const CACHE_TTL = (Deno.env.get("CACHE_TTL") || "1h").toLowerCase() === "1h" ? "1h" : "5m";
 const TTL = CACHE_TTL;
@@ -1091,7 +1091,7 @@ async function handler(req: Request): Promise<Response> {
       const t = appendRuntimeTime(body);
       rec.timeAdded = t.added ? "yes" : `no:${t.reason ?? "?"}`;
     }
-    // beta header intentionally NOT sent (legacy extended-cache-ttl beta obsolete per 2026 docs)
+    if (BETA_FLAG) headers.set("anthropic-beta", mergeBeta(headers.get("anthropic-beta")));
   } else if (CACHE_ENABLED && isChat(path)) {
     const inj = injectOpenAI(body);
     rec.applied = `${inj.applied.join(",") || "-"}${inj.skipped ? `|skip:${inj.skipped}` : ""}`;
