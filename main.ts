@@ -31,11 +31,10 @@
  */
 
 const PROVIDER = "ofox";
-const VERSION = "v7-ofox-sysonly";
+const VERSION = "v7-ofox-bp3";
 const DEFAULT_UPSTREAM = "https://api.ofox.ai/anthropic";
-const CACHE_TTL = (Deno.env.get("CACHE_TTL") || "1h").toLowerCase() === "1h" ? "1h" : "5m";
-const TTL = CACHE_TTL;
-const BETA_FLAG = TTL === "1h" ? "extended-cache-ttl-2025-04-11" : "";
+const TTL = "1h";
+const BETA_FLAG = "extended-cache-ttl-2025-04-11";
 const MAX_BREAKPOINTS = 4;
 const MIN_CHARS = 1500;
 const MAX_LOGS = 250;
@@ -180,7 +179,7 @@ function isChat(p: string): boolean {
 }
 
 function cc() {
-  return TTL === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
+  return { type: "ephemeral", ttl: TTL };
 }
 
 function formatTime(date = new Date(), withSeconds = false): string {
@@ -457,14 +456,27 @@ function injectBreakpoints(body: Any): { applied: string[]; skipped?: string } {
     applied.push(label);
     budget--;
   };
-  // 仅 system 一个 1h 断点（OFOX 网关注入 5m 到 tools/messages，多断点会触发
-  // "1h must not come after 5m"；system 在处理顺序最前，1h 在前合法）
+  if (Array.isArray(body.tools) && body.tools.length > 0) {
+    const tool = body.tools.filter(isObj).at(-1);
+    if (tool) mark(tool, `tools[${body.tools.length - 1}]`);
+  }
   if (body.system !== undefined) {
     const blocks = toBlocks(body.system);
     const target = blocks && lastCacheable(blocks);
     if (blocks && target) {
       body.system = blocks;
       mark(target, "system");
+    }
+  }
+  if (Array.isArray(body.messages) && body.messages.length > 0) {
+    const last = body.messages[body.messages.length - 1];
+    if (isObj(last)) {
+      const blocks = toBlocks(last.content);
+      const target = blocks && lastCacheable(blocks);
+      if (blocks && target) {
+        last.content = blocks;
+        mark(target, `msg[${body.messages.length - 1}]:${last.role ?? "?"}`);
+      }
     }
   }
   if (applied.filter((x) => !x.startsWith("removed")).length === 0) {
@@ -824,120 +836,6 @@ function rebuildBody(parsed: Any): { body: Any; dropped: string[] } {
   return { body: out, dropped };
 }
 
-// ================================================================
-// Keepalive: 原生 5m 缓存的"人工续期"——每 KEEP_INTERVAL 分钟，
-// 对每个仍活跃（KEEP_IDLE 内）的会话重放其最后一次真实请求
-// （max_tokens=1、非流式、去 thinking），命中缓存读取即免费刷新寿命。
-// 按会话内容指纹（sysHash+toolsHash+msgsExact）隔离，换对话各保各的。
-// 环境变量: KEEPALIVE=1 启用; KEEP_INTERVAL 默认 4(分钟); KEEP_IDLE 默认 60(分钟)
-// ================================================================
-const KEEPALIVE_ENABLED = Deno.env.get("KEEPALIVE") === "1";
-const KEEP_INTERVAL_MS = (() => {
-  const n = Number(Deno.env.get("KEEP_INTERVAL") ?? "4");
-  return Number.isFinite(n) && n > 0 ? Math.round(n * 60_000) : 4 * 60_000;
-})();
-const KEEP_IDLE_MS = (() => {
-  const n = Number(Deno.env.get("KEEP_IDLE") ?? "60");
-  return Number.isFinite(n) && n > 0 ? Math.round(n * 60_000) : 60 * 60_000;
-})();
-
-interface KeepaliveEntry {
-  key: string;
-  sysHash: string;
-  msgsExact: string[];
-  lastReal: number;
-  target: string;
-  headers: Headers;
-  body: Uint8Array;
-}
-const keepalives = new Map<string, KeepaliveEntry>();
-
-function keepaliveKey(sysHash: string, toolsHash: string, msgsExact: string[]): string {
-  return `${sysHash}|${toolsHash}|${msgsExact.length}:${msgsExact.slice(-4).join(",")}`;
-}
-
-function registerKeepalive(
-  outbound: Uint8Array,
-  target: string,
-  headers: Headers,
-  sysHash: string,
-  toolsHash: string,
-  msgsExact: string[],
-): void {
-  // 同会话演进（新 msgs 前缀包含旧 msgs）→ 更新旧条目而不是新增
-  for (const e of keepalives.values()) {
-    if (e.sysHash !== sysHash) continue;
-    const old = e.msgsExact;
-    if (old.length > msgsExact.length) continue;
-    let prefix = true;
-    for (let i = 0; i < old.length; i++) {
-      if (old[i] !== msgsExact[i]) { prefix = false; break; }
-    }
-    if (prefix) {
-      e.body = outbound;
-      e.target = target;
-      e.headers = headers;
-      e.msgsExact = msgsExact;
-      e.lastReal = Date.now();
-      return;
-    }
-  }
-  const key = keepaliveKey(sysHash, toolsHash, msgsExact);
-  keepalives.set(key, { key, sysHash, msgsExact, lastReal: Date.now(), target, headers, body: outbound });
-  if (keepalives.size > 20) {
-    const oldest = [...keepalives.values()].sort((a, b) => a.lastReal - b.lastReal)[0];
-    if (oldest) keepalives.delete(oldest.key);
-  }
-}
-
-function keepaliveBodyOf(original: Uint8Array): Uint8Array {
-  try {
-    const obj = JSON.parse(new TextDecoder().decode(original));
-    obj.stream = false;
-    obj.max_tokens = 1;
-    delete obj.thinking;
-    return new TextEncoder().encode(JSON.stringify(obj));
-  } catch {
-    return original;
-  }
-}
-
-async function runKeepalive(): Promise<void> {
-  const now = Date.now();
-  for (const e of [...keepalives.values()]) {
-    const idle = now - e.lastReal;
-    if (idle >= KEEP_IDLE_MS) {
-      keepalives.delete(e.key);
-      console.log(`[keepalive] drop ${e.key} (idle ${Math.round(idle / 60000)}m)`);
-      continue;
-    }
-    if (idle < KEEP_INTERVAL_MS) continue;
-    try {
-      const body = keepaliveBodyOf(e.body);
-      const headers = new Headers(e.headers);
-      headers.set("content-type", "application/json");
-      const resp = await fetch(e.target, {
-        method: "POST",
-        headers,
-        body,
-        ...(body !== null && typeof body === "object" ? { duplex: "half" } : {}),
-      } as RequestInit);
-      const text = await resp.text();
-      const usage = extractUsage(text);
-      const read = Number(usage.cache_read_input_tokens) || 0;
-      console.log(`[keepalive] ${e.key} status=${resp.status} read=${read} idle=${Math.round(idle / 60000)}m`);
-      e.lastReal = Date.now();
-    } catch (err) {
-      console.log(`[keepalive] ${e.key} FAIL ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-}
-
-if (KEEPALIVE_ENABLED) {
-  setInterval(() => { void runKeepalive(); }, KEEP_INTERVAL_MS);
-  console.log(`[keepalive] enabled (interval=${KEEP_INTERVAL_MS / 60000}m idle=${KEEP_IDLE_MS / 60000}m)`);
-}
-
 async function handler(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const path = normalizePath(url.pathname);
@@ -959,9 +857,6 @@ async function handler(req: Request): Promise<Response> {
       cache: CACHE_ENABLED ? "1h/tools+system+messages" : "passthrough",
       beta: "not-sent",
       maxBreakpoints: MAX_BREAKPOINTS,
-      keepalive: KEEPALIVE_ENABLED
-        ? { enabled: true, intervalMin: KEEP_INTERVAL_MS / 60000, idleMin: KEEP_IDLE_MS / 60000, sessions: keepalives.size }
-        : { enabled: false },
       minChars: MIN_CHARS,
       timeInjection: TIME_ENABLED ? "last-user-block-after-breakpoint" : "off",
       timeZone: TIME_ZONE,
@@ -1078,7 +973,7 @@ async function handler(req: Request): Promise<Response> {
       const t = appendRuntimeTime(body);
       rec.timeAdded = t.added ? "yes" : `no:${t.reason ?? "?"}`;
     }
-    if (BETA_FLAG) headers.set("anthropic-beta", mergeBeta(headers.get("anthropic-beta")));
+    // beta header intentionally NOT sent (legacy extended-cache-ttl beta obsolete per 2026 docs)
   } else if (CACHE_ENABLED && isChat(path)) {
     const inj = injectOpenAI(body);
     rec.applied = `${inj.applied.join(",") || "-"}${inj.skipped ? `|skip:${inj.skipped}` : ""}`;
@@ -1136,12 +1031,15 @@ async function handler(req: Request): Promise<Response> {
   if (LOG_BODY) rec.body = sanitizeForLog(body);
 
   body = sortDeep(body); // deterministic canonical serialization (official format)
-  const outboundBytes = new TextEncoder().encode(JSON.stringify(body));
-  if (KEEPALIVE_ENABLED && isMessages(path) && msgsExact && msgsExact.length > 0) {
-    registerKeepalive(outboundBytes, target, headers, rec.sysHash, rec.toolsHash, msgsExact);
-  }
   headers.set("content-type", "application/json");
-  return await forwardOnce("POST", target, headers, outboundBytes, rec, rec.convertSse);
+  return await forwardOnce(
+    "POST",
+    target,
+    headers,
+    new TextEncoder().encode(JSON.stringify(body)),
+    rec,
+    rec.convertSse,
+  );
 }
 
 Deno.serve({ port: PORT, hostname: "0.0.0.0" }, handler);
