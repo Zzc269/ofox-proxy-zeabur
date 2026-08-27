@@ -31,7 +31,7 @@
  */
 
 const PROVIDER = "ofox";
-const VERSION = "v7-ofox-1h-beta";
+const VERSION = "v7-ofox-sysonly";
 const DEFAULT_UPSTREAM = "https://api.ofox.ai/anthropic";
 const CACHE_TTL = (Deno.env.get("CACHE_TTL") || "1h").toLowerCase() === "1h" ? "1h" : "5m";
 const TTL = CACHE_TTL;
@@ -457,27 +457,14 @@ function injectBreakpoints(body: Any): { applied: string[]; skipped?: string } {
     applied.push(label);
     budget--;
   };
-  if (Array.isArray(body.tools) && body.tools.length > 0) {
-    const tool = body.tools.filter(isObj).at(-1);
-    if (tool) mark(tool, `tools[${body.tools.length - 1}]`);
-  }
+  // 仅 system 一个 1h 断点（OFOX 网关注入 5m 到 tools/messages，多断点会触发
+  // "1h must not come after 5m"；system 在处理顺序最前，1h 在前合法）
   if (body.system !== undefined) {
     const blocks = toBlocks(body.system);
     const target = blocks && lastCacheable(blocks);
     if (blocks && target) {
       body.system = blocks;
       mark(target, "system");
-    }
-  }
-  if (Array.isArray(body.messages) && body.messages.length > 0) {
-    const last = body.messages[body.messages.length - 1];
-    if (isObj(last)) {
-      const blocks = toBlocks(last.content);
-      const target = blocks && lastCacheable(blocks);
-      if (blocks && target) {
-        last.content = blocks;
-        mark(target, `msg[${body.messages.length - 1}]:${last.role ?? "?"}`);
-      }
     }
   }
   if (applied.filter((x) => !x.startsWith("removed")).length === 0) {
